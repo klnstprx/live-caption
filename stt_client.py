@@ -5,7 +5,6 @@ import io
 import wave
 import logging
 import requests
-from requests.exceptions import RequestException
 
 logger = logging.getLogger("vad-whisper-llama")
 
@@ -40,20 +39,14 @@ class WhisperClient:
         files = {"file": ("audio.wav", wav_buf, "audio/wav")}  
         data = {"temperature": 0.0, "temperature_inc": 0.2, "response_format": "json"}
         logger.debug("Whisper request URL: %s, data: %s", self.url, data)
-        try:
-            resp = self.session.post(
-                self.url, files=files, data=data, timeout=self.timeout
-            )
-            logger.debug("Whisper response [%d]: %s", resp.status_code, resp.text)
-            resp.raise_for_status()
-        except RequestException as e:
-            logger.error(f"Whisper request failed: {e}")
-            return ""
-        try:
-            j = resp.json()
-            return j.get("text", "").strip()
-        except ValueError as e:
-            logger.error(
-                f"Invalid JSON from Whisper: {e}. Response text: {getattr(resp, 'text', '')}"
-            )
-            return ""
+        # Send request to Whisper STT server
+        resp = self.session.post(
+            self.url, files=files, data=data, timeout=self.timeout
+        )
+        logger.debug("Whisper response [%d]: %s", resp.status_code, resp.text)
+        # Raise for HTTP errors
+        resp.raise_for_status()
+        # Parse JSON response
+        j = resp.json()
+        # Extract transcription text
+        return j.get("text", "").strip()
