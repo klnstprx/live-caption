@@ -1,6 +1,7 @@
 import webrtcvad
 from dotenv import load_dotenv
 import os
+import sys
 import argparse
 import queue
 import threading
@@ -441,7 +442,37 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable debug logging (sets log level to DEBUG)",
     )
+    parser.add_argument(
+        "--list-devices",
+        action="store_true",
+        help="List available audio input devices (with index) and exit",
+    )
     args = parser.parse_args()
+    # Handle listing audio input devices
+    if getattr(args, 'list_devices', False):
+        pa = pyaudio.PyAudio()
+        print("Available audio input devices:")
+        for i in range(pa.get_device_count()):
+            try:
+                info = pa.get_device_info_by_index(i)
+            except Exception:
+                continue
+            if info.get('maxInputChannels', 0) > 0:
+                channels = info.get('maxInputChannels')
+                print(f"{i}: {info.get('name')} ({channels} input channel{'s' if channels != 1 else ''})")
+        pa.terminate()
+        sys.exit(0)
+    # Validate device-index if specified
+    if args.device_index is not None:
+        pa = pyaudio.PyAudio()
+        try:
+            info = pa.get_device_info_by_index(args.device_index)
+        except Exception as e:
+            parser.error(f"Invalid device index {args.device_index}: {e}")
+        finally:
+            pa.terminate()
+        if info.get('maxInputChannels', 0) <= 0:
+            parser.error(f"Device {args.device_index} has no input channels")
     # Configure debug logging if requested
     if args.debug:
         logger.setLevel(logging.DEBUG)
