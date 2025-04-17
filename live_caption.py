@@ -24,6 +24,7 @@ from utils import (
 from audio_capture import vad_capture_thread
 from stt_client import WhisperClient
 from translation_client import LlamaClient
+from concurrent.futures import ThreadPoolExecutor
 
 DEFAULT_WHISPER_SERVER_URL = "http://127.0.0.1:8081/inference"
 DEFAULT_LLAMA_SERVER_URL = "http://127.0.0.1:8080/v1/chat/completions"
@@ -115,15 +116,16 @@ def main(args):
         except Exception as e:
             logger.error(f"Error creating log file handler: {e}")
 
-    capture_thread = threading.Thread(
-        target=vad_capture_thread, args=(audio_queue, exit_event, args), daemon=True
-    )
-    capture_thread.start()
+    # Start VAD capture in background with exception propagation
+    executor = ThreadPoolExecutor(max_workers=1)
+    capture_future = executor.submit(vad_capture_thread, audio_queue, exit_event, args)
 
     try:
         while True:
-            if not capture_thread.is_alive() and exit_event.is_set():
-                logger.error("Capture thread exited. Stopping.")
+            # Stop if capture thread finished or exit event set
+            if capture_future.done():
+                if capture_future.exception():
+                    logger.error("Capture thread error", exc_info=capture_future.exception())
                 break
             try:
                 audio_data = audio_queue.get(timeout=0.5)
@@ -197,9 +199,7 @@ def main(args):
         logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
     finally:
         exit_event.set()
-        if capture_thread.is_alive():
-            logger.info("Waiting for capture thread to exit...")
-            capture_thread.join(timeout=2.0)
+        executor.shutdown(wait=False)
 
         # Finalize file logging
         if file_handler:
