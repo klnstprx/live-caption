@@ -24,8 +24,7 @@ DEFAULT_MAX_SILENCE_FRAMES = 25
 DEFAULT_MODEL_NAME = "gemma-3-12b-it"
 DEFAULT_MIN_CHUNK_DURATION_MS = 1000
 
-DEFAULT_SYSTEM_PROMPT = """
-You are an expert translator specializing in **physics**, fluent in Korean and English. Always respond strictly in English.
+DEFAULT_SYSTEM_PROMPT = """You are an expert translator specializing in **physics**, fluent in Korean and English. Always respond strictly in English.
 
 Your primary task is to translate Korean input from an ongoing **physics lecture** into accurate and clear English.
 
@@ -35,8 +34,7 @@ Preserve the original meaning and the **formal, academic tone** typical of a lec
 
 Keep in mind that each input is a segment of a longer lecture, so context may build over time.
 
-Your response **must** be a structured JSON object with a single key, `translatedText`, containing the English translation.
-"""
+Your response **must** be a structured JSON object with a single key, `translatedText`, containing the English translation."""
 
 DEFAULT_MAX_CONVERSATION_MESSAGES = 2 * 4 + 1
 DEFAULT_OUTPUT_FILE = None
@@ -50,10 +48,13 @@ logging.basicConfig(
 
 # --- Helper Functions ---
 def print_and_log(message: str, output_file_handle: Optional[Any] = None):
+    # Log to console (with timestamp and level via logger configuration)
     logger.info(message)
+    # Also write to output file with timestamp and level prefix
     if output_file_handle:
         try:
-            output_file_handle.write(message + "\n")
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            output_file_handle.write(f"{ts} [INFO] {message}\n")
             output_file_handle.flush()
         except Exception as e:
             logger.error(f"Error writing to output file: {e}")
@@ -87,12 +88,14 @@ def vad_capture_thread(audio_queue, exit_event, args):
     p = pyaudio.PyAudio()
     stream = None
     try:
+        # Open audio stream; if device_index is None, PyAudio will use default
         stream = p.open(
             rate=args.rate,
             channels=args.channels,
             format=pyaudio.paInt16,
             input=True,
             frames_per_buffer=chunk_size * 4,
+            input_device_index=args.device_index,
         )
         logger.info("Microphone capture thread started. Listening...")
     except Exception as e:
@@ -154,7 +157,8 @@ def whisper_transcribe_chunk(raw_pcm: bytes, args) -> str:
     try:
         with wave.open(wav_buf, "wb") as wf:
             wf.setnchannels(args.channels)
-            wf.setsampwidth(pyaudio.get_sample_size(pyaudio.paInt16))
+            # use sample width determined in main via args.sample_width
+            wf.setsampwidth(args.sample_width)
             wf.setframerate(args.rate)
             wf.writeframes(raw_pcm)
         wav_buf.seek(0)
@@ -162,7 +166,8 @@ def whisper_transcribe_chunk(raw_pcm: bytes, args) -> str:
         logger.error(f"Error creating WAV: {e}")
         return ""
     files = {"file": ("audio.wav", wav_buf, "audio/wav")}
-    data = {"temperature": "0.0", "temperature_inc": "0.2", "response_format": "json"}
+    # Ensure numeric types for temperature parameters
+    data = {"temperature": 0.0, "temperature_inc": 0.2, "response_format": "json"}
     try:
         resp = requests.post(args.whisper_url, files=files, data=data, timeout=30)
         resp.raise_for_status()
@@ -215,13 +220,17 @@ def llama_translate(conversation: List[Dict], args) -> str:
 def main(args):
     logger.info(f"Whisper URL: {args.whisper_url}")
     logger.info(f"Llama URL: {args.llama_url}")
+    # Instantiate PyAudio once to determine sample width (bytes per sample for paInt16)
+    paudio = pyaudio.PyAudio()
+    args.sample_width = paudio.get_sample_size(pyaudio.paInt16)
 
     conversation = [{"role": "system", "content": args.system_prompt}]
     audio_queue = queue.Queue(maxsize=10)
     exit_event = threading.Event()
 
     # For audio padding computation
-    bytes_per_sample = pyaudio.get_sample_size(pyaudio.paInt16)
+    # use sample width obtained above
+    bytes_per_sample = args.sample_width
     bytes_per_second = get_audio_bytes_per_second(
         args.rate, args.channels, bytes_per_sample
     )
@@ -274,6 +283,13 @@ def main(args):
 
             # Llama
             llama_reply_raw = llama_translate(conversation, args)
+            # If Llama returned nothing, drop the last user message to avoid context pollution
+            if not llama_reply_raw:
+                print_and_log("(No translation result from Llama)", output_file_handle)
+                # remove the user message appended just before
+                if conversation and conversation[-1].get("role") == "user":
+                    conversation.pop()
+                continue
 
             # Handle Llama JSON response
             translation = "(No translation)"
@@ -303,6 +319,8 @@ def main(args):
 
     except KeyboardInterrupt:
         logger.info("Stopping...")
+    except Exception as e:
+        logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
     finally:
         exit_event.set()
         if capture_thread.is_alive():
@@ -318,6 +336,11 @@ def main(args):
                 logger.info(f"Log saved to {args.output_file}")
             except Exception as e:
                 logger.error(f"Error closing output file: {e}")
+        # Terminate the PyAudio instance used for sample width
+        try:
+            paudio.terminate()
+        except Exception as e:
+            logger.error(f"Error terminating PyAudio: {e}")
 
 
 # --- CLI ---
@@ -339,7 +362,11 @@ if __name__ == "__main__":
         default=os.environ.get("LLAMA_URL", DEFAULT_LLAMA_SERVER_URL),
     )
     parser.add_argument(
-        "--rate", type=int, default=int(os.environ.get("RATE", DEFAULT_RATE))
+        "--rate",
+        type=int,
+        choices=[8000, 16000, 32000, 48000],
+        default=int(os.environ.get("RATE", DEFAULT_RATE)),
+        help="Audio sampling rate in Hz (webrtcvad supports only 8000, 16000, 32000, 48000)",
     )
     parser.add_argument(
         "--channels",
@@ -391,8 +418,18 @@ if __name__ == "__main__":
         type=str,
         default=os.environ.get("OUTPUT_FILE", DEFAULT_OUTPUT_FILE),
     )
+    # Optional: specify audio input device index (PyAudio)
+    parser.add_argument(
+        "--device-index",
+        type=int,
+        default=(int(os.environ["DEVICE_INDEX"]) if os.environ.get("DEVICE_INDEX") is not None else None),
+        help="Index of audio input device (as listed by PyAudio).",
+    )
     args = parser.parse_args()
     # Validate max_conversation_messages
     if args.max_conversation_messages < 1 or args.max_conversation_messages % 2 == 0:
         parser.error("--max-conversation-messages must be an odd number >= 1")
+    # Validate min_chunk_duration_ms
+    if args.min_chunk_duration_ms < 0:
+        parser.error("--min-chunk-duration-ms must be >= 0")
     main(args)
