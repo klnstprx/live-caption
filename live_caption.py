@@ -8,6 +8,7 @@ import threading
 import time
 import json
 import requests
+from requests.exceptions import RequestException
 import pyaudio
 import wave
 import io
@@ -164,15 +165,21 @@ def whisper_transcribe_chunk(raw_pcm: bytes, args) -> str:
     data = {"temperature": 0.0, "temperature_inc": 0.2, "response_format": "json"}  
     # Debug: log request details  
     logger.debug("Whisper request URL: %s, data: %s", args.whisper_url, data)  
-    try:  
-        resp = requests.post(args.whisper_url, files=files, data=data, timeout=30)  
-        # Debug: log response status and body  
-        logger.debug("Whisper response [%d]: %s", resp.status_code, resp.text)  
-        resp.raise_for_status()  
-        return resp.json().get("text", "").strip()  
-    except Exception as e:  
-        logger.error(f"Whisper error: {e}")  
-        return ""  
+    try:
+        resp = requests.post(args.whisper_url, files=files, data=data, timeout=30)
+        # Debug: log response status and body
+        logger.debug("Whisper response [%d]: %s", resp.status_code, resp.text)
+        resp.raise_for_status()
+    except RequestException as e:
+        logger.error(f"Whisper request failed: {e}")
+        return ""
+    # Parse JSON response
+    try:
+        j = resp.json()
+        return j.get("text", "").strip()
+    except ValueError as e:
+        logger.error(f"Invalid JSON from Whisper: {e}. Response text: {getattr(resp, 'text', '')}")
+        return ""
 
 
 def llama_translate(conversation: List[Dict], args) -> str:
@@ -201,27 +208,48 @@ def llama_translate(conversation: List[Dict], args) -> str:
         },
     }
     headers = {"Content-Type": "application/json"}
+    # Send request to Llama server
     try:
-        # Debug: log Llama request
         logger.debug("Llama request URL: %s, payload: %s", args.llama_url, json.dumps(payload, ensure_ascii=False))
         resp = requests.post(args.llama_url, json=payload, headers=headers, timeout=60)
-        # Debug: log Llama response
         logger.debug("Llama response [%d]: %s", resp.status_code, resp.text)
         resp.raise_for_status()
+    except RequestException as e:
+        logger.error(f"Llama request failed: {e}")
+        return ""
+    # Parse JSON response
+    try:
         j = resp.json()
-        choices = j.get("choices", [])
-        if choices and "message" in choices[0] and "content" in choices[0]["message"]:
-            return choices[0]["message"]["content"]
-        logger.error(f"Unexpected Llama resp structure: {j}")
+    except ValueError as e:
+        logger.error(f"Invalid JSON from Llama: {e}. Response text: {resp.text}")
         return ""
-    except Exception as e:
-        logger.error(f"Llama error: {e}")
-        return ""
+    choices = j.get("choices", [])
+    if choices and "message" in choices[0] and "content" in choices[0]["message"]:
+        return choices[0]["message"]["content"]
+    logger.error(f"Unexpected Llama resp structure: {j}")
+    return ""
 
+
+def health_check_endpoint(name: str, url: str, timeout: int = 5):
+    """Perform a quick HEAD request to verify the service is reachable."""
+    try:
+        resp = requests.head(url, timeout=timeout)
+        status = resp.status_code
+        # Treat 5xx codes as failures
+        if status >= 500:
+            logger.error(f"{name} endpoint returned HTTP {status}")
+            sys.exit(1)
+        logger.info(f"{name} endpoint reachable (HTTP {status})")
+    except requests.RequestException as e:
+        logger.error(f"{name} health-check failed: {e}")
+        sys.exit(1)
 
 def main(args):
     logger.info(f"Whisper URL: {args.whisper_url}")
     logger.info(f"Llama URL: {args.llama_url}")
+    # Health-check the Whisper and Llama endpoints
+    health_check_endpoint("Whisper", args.whisper_url)
+    health_check_endpoint("Llama", args.llama_url)
     # Instantiate PyAudio once to determine sample width (bytes per sample for paInt16)
     paudio = pyaudio.PyAudio()
     args.sample_width = paudio.get_sample_size(pyaudio.paInt16)
@@ -316,11 +344,10 @@ def main(args):
                     assistant_content_to_save = json.dumps(
                         llama_reply_json, ensure_ascii=False, indent=2
                     )
-            except Exception:
-                print_and_log(
-                    f"LLM did not return valid JSON. Raw: {llama_reply_raw}",
-                    output_file_handle,
-                )
+            except (json.JSONDecodeError, TypeError) as e:
+                err_msg = f"LLM returned invalid JSON ({e}). Raw: {llama_reply_raw}"
+                logger.error(err_msg)
+                print_and_log(err_msg, output_file_handle)
 
             conversation.append(
                 {"role": "assistant", "content": assistant_content_to_save}
