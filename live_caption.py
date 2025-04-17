@@ -165,16 +165,20 @@ def whisper_transcribe_chunk(raw_pcm: bytes, args) -> str:
     except Exception as e:
         logger.error(f"Error creating WAV: {e}")
         return ""
-    files = {"file": ("audio.wav", wav_buf, "audio/wav")}
-    # Ensure numeric types for temperature parameters
-    data = {"temperature": 0.0, "temperature_inc": 0.2, "response_format": "json"}
-    try:
-        resp = requests.post(args.whisper_url, files=files, data=data, timeout=30)
-        resp.raise_for_status()
-        return resp.json().get("text", "").strip()
-    except Exception as e:
-        logger.error(f"Whisper error: {e}")
-        return ""
+    files = {"file": ("audio.wav", wav_buf, "audio/wav")}  
+    # Ensure numeric types for temperature parameters  
+    data = {"temperature": 0.0, "temperature_inc": 0.2, "response_format": "json"}  
+    # Debug: log request details  
+    logger.debug("Whisper request URL: %s, data: %s", args.whisper_url, data)  
+    try:  
+        resp = requests.post(args.whisper_url, files=files, data=data, timeout=30)  
+        # Debug: log response status and body  
+        logger.debug("Whisper response [%d]: %s", resp.status_code, resp.text)  
+        resp.raise_for_status()  
+        return resp.json().get("text", "").strip()  
+    except Exception as e:  
+        logger.error(f"Whisper error: {e}")  
+        return ""  
 
 
 def llama_translate(conversation: List[Dict], args) -> str:
@@ -204,7 +208,11 @@ def llama_translate(conversation: List[Dict], args) -> str:
     }
     headers = {"Content-Type": "application/json"}
     try:
+        # Debug: log Llama request
+        logger.debug("Llama request URL: %s, payload: %s", args.llama_url, json.dumps(payload, ensure_ascii=False))
         resp = requests.post(args.llama_url, json=payload, headers=headers, timeout=60)
+        # Debug: log Llama response
+        logger.debug("Llama response [%d]: %s", resp.status_code, resp.text)
         resp.raise_for_status()
         j = resp.json()
         choices = j.get("choices", [])
@@ -425,7 +433,16 @@ if __name__ == "__main__":
         default=(int(os.environ["DEVICE_INDEX"]) if os.environ.get("DEVICE_INDEX") is not None else None),
         help="Index of audio input device (as listed by PyAudio).",
     )
+    parser.add_argument(
+        "--debug", "-d",
+        action="store_true",
+        help="Enable debug logging (sets log level to DEBUG)",
+    )
     args = parser.parse_args()
+    # Configure debug logging if requested
+    if args.debug:
+        logger.setLevel(logging.DEBUG)
+        logger.debug("Debug logging enabled")
     # Validate max_conversation_messages
     if args.max_conversation_messages < 1 or args.max_conversation_messages % 2 == 0:
         parser.error("--max-conversation-messages must be an odd number >= 1")
