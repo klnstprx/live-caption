@@ -1,5 +1,5 @@
 """Live caption orchestrator: capture audio via VAD, transcribe with Whisper, translate with Llama, and output in real time."""
-from dotenv import load_dotenv
+
 import os
 import sys
 import argparse
@@ -9,10 +9,38 @@ import time
 import json
 import logging
 
-import pyaudio
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+# Required dependencies: if missing, exit with error (allow --help)
+if not any(arg in ('-h','--help') for arg in sys.argv):
+    missing = []
+    try:
+        import webrtcvad
+    except ImportError:
+        missing.append('webrtcvad')
+    try:
+        import pyaudio
+    except ImportError:
+        missing.append('pyaudio')
+    try:
+        import requests
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+    except ImportError:
+        missing.append('requests')
+    if missing:
+        print(
+            f"Error: Missing required libraries: {', '.join(missing)}."
+            " Please install them via pip.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+# Optional dependencies
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    # If python-dotenv is not installed, define a no-op
+    def load_dotenv():
+        pass
 
 from utils import (
     print_and_log,
@@ -20,11 +48,9 @@ from utils import (
     health_check_endpoint,
     get_audio_bytes_per_second,
     pad_audio,
+    JSONFormatter,
 )
-from audio_capture import vad_capture_thread
-from stt_client import WhisperClient
-from translation_client import LlamaClient
-from concurrent.futures import ThreadPoolExecutor
+# Heavy external modules are imported within main to allow CLI help without dependencies
 
 DEFAULT_WHISPER_SERVER_URL = "http://127.0.0.1:8081/inference"
 DEFAULT_LLAMA_SERVER_URL = "http://127.0.0.1:8080/v1/chat/completions"
@@ -52,9 +78,6 @@ DEFAULT_MAX_CONVERSATION_MESSAGES = 2 * 4 + 1
 DEFAULT_OUTPUT_FILE = None
 
 logger = logging.getLogger("vad-whisper-llama")
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
-)
 
 
 def main(args):
@@ -68,7 +91,12 @@ def main(args):
     """
     logger.info(f"Whisper URL: {args.whisper_url}")
     logger.info(f"Llama URL: {args.llama_url}")
-    health_check_endpoint("Whisper", args.whisper_url)
+    # Import pipeline components here to allow CLI help without dependencies
+    import audio_capture
+    from audio_capture import vad_capture_thread, list_audio_devices
+    from stt_client import WhisperClient
+    from translation_client import LlamaClient
+    from concurrent.futures import ThreadPoolExecutor
     health_check_endpoint("Whisper", args.whisper_url)
     health_check_endpoint("Llama", args.llama_url)
     paudio = pyaudio.PyAudio()
@@ -125,7 +153,9 @@ def main(args):
             # Stop if capture thread finished or exit event set
             if capture_future.done():
                 if capture_future.exception():
-                    logger.error("Capture thread error", exc_info=capture_future.exception())
+                    logger.error(
+                        "Capture thread error", exc_info=capture_future.exception()
+                    )
                 break
             try:
                 audio_data = audio_queue.get(timeout=0.5)
@@ -222,74 +252,82 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Real-time VAD + Whisper + Llama translation"
     )
-    parser.add_argument(
+    # Argument groups for better CLI UX
+    server_group = parser.add_argument_group("Server options")
+    server_group.add_argument(
         "--whisper-url",
         type=str,
         default=os.environ.get("WHISPER_URL", DEFAULT_WHISPER_SERVER_URL),
     )
-    parser.add_argument(
+    server_group.add_argument(
         "--llama-url",
         type=str,
         default=os.environ.get("LLAMA_URL", DEFAULT_LLAMA_SERVER_URL),
     )
-    parser.add_argument(
+    # Audio capture & VAD options
+    audio_group = parser.add_argument_group("Audio capture & VAD options")
+    audio_group.add_argument(
         "--rate",
         type=int,
         choices=[8000, 16000, 32000, 48000],
         default=int(os.environ.get("RATE", DEFAULT_RATE)),
         help="Audio sampling rate in Hz (webrtcvad supports only 8000, 16000, 32000, 48000)",
     )
-    parser.add_argument(
+    audio_group.add_argument(
         "--channels",
         type=int,
         default=int(os.environ.get("CHANNELS", DEFAULT_CHANNELS)),
         choices=[1],
     )
-    parser.add_argument(
+    audio_group.add_argument(
         "--frame-duration-ms",
         type=int,
         default=int(os.environ.get("FRAME_DURATION_MS", DEFAULT_FRAME_DURATION_MS)),
         choices=[10, 20, 30],
     )
-    parser.add_argument(
+    audio_group.add_argument(
         "--vad-mode",
         type=int,
         default=int(os.environ.get("VAD_MODE", DEFAULT_VAD_MODE)),
         choices=[0, 1, 2, 3],
     )
-    parser.add_argument(
+    audio_group.add_argument(
         "--max-silence-frames",
         type=int,
         default=int(os.environ.get("MAX_SILENCE_FRAMES", DEFAULT_MAX_SILENCE_FRAMES)),
     )
-    parser.add_argument(
+    # Model & prompt options
+    model_group = parser.add_argument_group("Model & prompt options")
+    model_group.add_argument(
         "--model-name",
         type=str,
         default=os.environ.get("MODEL_NAME", DEFAULT_MODEL_NAME),
     )
-    parser.add_argument(
+    model_group.add_argument(
         "--system-prompt",
         type=str,
         default=os.environ.get("SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT),
     )
-    parser.add_argument(
+    model_group.add_argument(
         "--max-conversation-messages",
         type=int,
         default=int(os.environ.get("MAX_CONV_MSGS", DEFAULT_MAX_CONVERSATION_MESSAGES)),
     )
-    parser.add_argument(
+    audio_group.add_argument(
         "--min-chunk-duration-ms",
         type=int,
         default=int(
             os.environ.get("MIN_CHUNK_DURATION_MS", DEFAULT_MIN_CHUNK_DURATION_MS)
         ),
     )
-    parser.add_argument(
+    # Output & logging options
+    out_group = parser.add_argument_group("Output & logging options")
+    out_group.add_argument(
         "--output-file",
         type=str,
         default=os.environ.get("OUTPUT_FILE", DEFAULT_OUTPUT_FILE),
     )
-    parser.add_argument(
+    audio_group.add_argument(
         "--device-index",
         type=int,
         default=(
@@ -299,13 +337,13 @@ if __name__ == "__main__":
         ),
         help="Index of audio input device (as listed by PyAudio).",
     )
-    parser.add_argument(
+    out_group.add_argument(
         "--debug",
         "-d",
         action="store_true",
         help="Enable debug logging (sets log level to DEBUG)",
     )
-    parser.add_argument(
+    out_group.add_argument(
         "--list-devices",
         action="store_true",
         help="List available audio input devices (with index) and exit",
@@ -320,7 +358,7 @@ if __name__ == "__main__":
                 info = pa.get_device_info_by_index(i)
             except Exception:
                 continue
-            if info.get("maxInputChannels", 0) > 0:
+            if int(info.get("maxInputChannels", 0)) > 0:
                 channels = info.get("maxInputChannels")
                 print(
                     f"{i}: {info.get('name')} ({channels} input channel{'s' if channels != 1 else ''})"
@@ -336,12 +374,19 @@ if __name__ == "__main__":
             parser.error(f"Invalid device index {args.device_index}: {e}")
         finally:
             pa.terminate()
-        if info.get("maxInputChannels", 0) <= 0:
+        if int(info.get("maxInputChannels", 0)) <= 0:
             parser.error(f"Device {args.device_index} has no input channels")
     # Configure debug logging if requested
     if args.debug:
         logger.setLevel(logging.DEBUG)
         logger.debug("Debug logging enabled")
+    # Configure JSON structured logging
+    for h in logger.handlers[:]:
+        logger.removeHandler(h)
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setFormatter(JSONFormatter())
+    logger.addHandler(ch)
+    logger.setLevel(logging.DEBUG if args.debug else logging.INFO)
     # Validate max_conversation_messages
     if args.max_conversation_messages < 1 or args.max_conversation_messages % 2 == 0:
         parser.error("--max-conversation-messages must be an odd number >= 1")

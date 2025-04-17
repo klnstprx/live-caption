@@ -30,6 +30,24 @@ def health_check_endpoint(name: str, url: str, timeout: int = 5):
         logger.error(f"{name} health-check failed: {e}")
         sys.exit(1)
   
+import json as _json
+import logging as _logging
+
+class JSONFormatter(_logging.Formatter):
+    """
+    Formatter that outputs log records as JSON objects.
+    """
+    def format(self, record):
+        record_dict = {
+            "timestamp": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            record_dict["exc_info"] = self.formatException(record.exc_info)
+        return _json.dumps(record_dict, ensure_ascii=False)
+  
 def get_audio_bytes_per_second(rate: int, channels: int, sample_width: int) -> int:
     """Calculate audio byte rate: bytes per second."""
     return rate * channels * sample_width

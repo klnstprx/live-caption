@@ -79,4 +79,19 @@ def vad_capture_thread(audio_queue, exit_event, args):
             stream.close()
         pa.terminate()
         logger.info("Microphone capture thread exited.")
+    
+def list_audio_devices():
+    """List available audio input devices."""
+    pa = pyaudio.PyAudio()
+    print("Available audio input devices:")
+    for i in range(pa.get_device_count()):
+        try:
+            info = pa.get_device_info_by_index(i)
+        except Exception:
+            continue
+        if info.get('maxInputChannels', 0) > 0:
+            channels = info.get('maxInputChannels')
+            name = info.get('name')
+            print(f"{i}: {name} ({channels} input channel{'s' if channels != 1 else ''})")
+    pa.terminate()
 
