@@ -278,8 +278,11 @@ def main(args):
                 f"Padded audio to {current_duration_ms:.1f}ms", output_file_handle
             )
 
-            # Whisper
+            # Whisper (STT)
+            t0 = time.perf_counter()
             recognized_ko = whisper_transcribe_chunk(audio_data, args)
+            t1 = time.perf_counter()
+            logger.info("Whisper STT latency: %.1f ms", (t1 - t0) * 1000)
             if not recognized_ko:
                 print_and_log("(No transcription result)", output_file_handle)
                 continue
@@ -287,8 +290,11 @@ def main(args):
             print_and_log(f"(Korean) STT: {recognized_ko}", output_file_handle)
             conversation.append({"role": "user", "content": recognized_ko})
 
-            # Llama
+            # Llama translation
+            t0 = time.perf_counter()
             llama_reply_raw = llama_translate(conversation, args)
+            t1 = time.perf_counter()
+            logger.info("Llama translation latency: %.1f ms", (t1 - t0) * 1000)
             # If Llama returned nothing, drop the last user message to avoid context pollution
             if not llama_reply_raw:
                 print_and_log("(No translation result from Llama)", output_file_handle)
