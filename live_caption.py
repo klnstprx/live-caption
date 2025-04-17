@@ -1,4 +1,4 @@
-import webrtcvad
+# Standard and third-party imports
 from dotenv import load_dotenv
 import os
 import sys
@@ -7,13 +7,21 @@ import queue
 import threading
 import time
 import json
-import requests
-from requests.exceptions import RequestException
-import pyaudio
-import wave
-import io
 import logging
-from typing import Optional, List, Dict, Any
+
+import pyaudio
+
+# Local module imports
+from utils import (
+    print_and_log,
+    trim_conversation_history,
+    health_check_endpoint,
+    get_audio_bytes_per_second,
+    pad_audio,
+)
+from audio_capture import vad_capture_thread
+from stt_client import whisper_transcribe_chunk
+from translation_client import llama_translate
 
 # --- Constants ---
 DEFAULT_WHISPER_SERVER_URL = "http://127.0.0.1:8081/inference"
@@ -48,202 +56,6 @@ logging.basicConfig(
 )
 
 
-# --- Helper Functions ---
-def print_and_log(message: str, output_file_handle: Optional[Any] = None):
-    # Log to console (with timestamp and level via logger configuration)
-    logger.info(message)
-    # File logging is handled by configured logging handlers
-
-
-def get_audio_bytes_per_second(rate: int, channels: int, sample_width: int) -> int:
-    return rate * channels * sample_width
-
-
-def pad_audio(audio_data: bytes, min_bytes: int, sample_width: int) -> bytes:
-    """Pads the audio data with silence to reach the minimum byte length."""
-    current_bytes = len(audio_data)
-    bytes_to_add = max(0, min_bytes - current_bytes)
-    # Ensure even padding for sample width
-    if bytes_to_add % sample_width:
-        bytes_to_add += sample_width - (bytes_to_add % sample_width)
-    padded_audio = audio_data + (b"\x00" * bytes_to_add)
-    return padded_audio
-
-
-def trim_conversation_history(conversation: List[Dict], max_len: int):
-    """Keeps the conversation at the max length (always keeps system prompt at index 0)."""
-    while len(conversation) > max_len and len(conversation) > 2:
-        del conversation[1:3]  # Remove oldest user/assistant pair
-
-
-# --- Audio Capture Thread ---
-def vad_capture_thread(audio_queue, exit_event, args):
-    vad = webrtcvad.Vad(args.vad_mode)
-    chunk_size = int(args.rate * args.frame_duration_ms / 1000)
-    p = pyaudio.PyAudio()
-    stream = None
-    try:
-        # Open audio stream; if device_index is None, PyAudio will use default
-        stream = p.open(
-            rate=args.rate,
-            channels=args.channels,
-            format=pyaudio.paInt16,
-            input=True,
-            frames_per_buffer=chunk_size * 4,
-            input_device_index=args.device_index,
-        )
-        logger.info("Microphone capture thread started. Listening...")
-    except Exception as e:
-        logger.error(f"Error opening audio stream: {e}")
-        exit_event.set()
-        return
-
-    speech_frames, num_silent, in_speech = [], 0, False
-
-    try:
-        while not exit_event.is_set():
-            try:
-                frame = stream.read(chunk_size, exception_on_overflow=False)
-            except OSError as e:
-                logger.warning(f"Audio buffer overflow or read error: {e}")
-                time.sleep(0.05)
-                continue
-            if len(frame) < chunk_size * 2:
-                time.sleep(0.01)
-                continue
-
-            try:
-                is_speech = vad.is_speech(frame, args.rate)
-            except Exception as e:
-                logger.warning(f"VAD processing error: {e}")
-                continue
-
-            if is_speech:
-                speech_frames.append(frame)
-                num_silent = 0
-                in_speech = True
-            elif in_speech:
-                num_silent += 1
-                speech_frames.append(frame)
-                if num_silent > args.max_silence_frames:
-                    utterance = b"".join(speech_frames)
-                    try:
-                        audio_queue.put_nowait(utterance)
-                    except queue.Full:
-                        logger.warning("Audio queue full, dropping utterance.")
-                    speech_frames, in_speech, num_silent = [], False, 0
-    finally:
-        if in_speech and speech_frames:
-            try:
-                audio_queue.put(b"".join(speech_frames), timeout=0.5)
-            except queue.Full:
-                logger.warning("Audio queue full on thread exit.")
-        # Always clean up
-        if stream:
-            stream.stop_stream()
-            stream.close()
-        p.terminate()
-        logger.info("Microphone capture thread exited.")
-
-
-def whisper_transcribe_chunk(raw_pcm: bytes, args) -> str:
-    """Convert raw PCM to WAV in-memory and POST to Whisper server."""
-    wav_buf = io.BytesIO()
-    try:
-        with wave.open(wav_buf, "wb") as wf:
-            wf.setnchannels(args.channels)
-            # use sample width determined in main via args.sample_width
-            wf.setsampwidth(args.sample_width)
-            wf.setframerate(args.rate)
-            wf.writeframes(raw_pcm)
-        wav_buf.seek(0)
-    except Exception as e:
-        logger.error(f"Error creating WAV: {e}")
-        return ""
-    files = {"file": ("audio.wav", wav_buf, "audio/wav")}  
-    # Ensure numeric types for temperature parameters  
-    data = {"temperature": 0.0, "temperature_inc": 0.2, "response_format": "json"}  
-    # Debug: log request details  
-    logger.debug("Whisper request URL: %s, data: %s", args.whisper_url, data)  
-    try:
-        resp = requests.post(args.whisper_url, files=files, data=data, timeout=30)
-        # Debug: log response status and body
-        logger.debug("Whisper response [%d]: %s", resp.status_code, resp.text)
-        resp.raise_for_status()
-    except RequestException as e:
-        logger.error(f"Whisper request failed: {e}")
-        return ""
-    # Parse JSON response
-    try:
-        j = resp.json()
-        return j.get("text", "").strip()
-    except ValueError as e:
-        logger.error(f"Invalid JSON from Whisper: {e}. Response text: {getattr(resp, 'text', '')}")
-        return ""
-
-
-def llama_translate(conversation: List[Dict], args) -> str:
-    """Send conversation to llama-server, expect a JSON with 'translatedText'."""
-    payload = {
-        "model": args.model_name,
-        "messages": conversation,
-        "temperature": 0.7,
-        "max_tokens": 1024,
-        "stream": False,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "translation",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "translatedText": {
-                            "type": "string",
-                            "description": "The translated text in the target language.",
-                        }
-                    },
-                    "required": ["translatedText"],
-                },
-            },
-        },
-    }
-    headers = {"Content-Type": "application/json"}
-    # Send request to Llama server
-    try:
-        logger.debug("Llama request URL: %s, payload: %s", args.llama_url, json.dumps(payload, ensure_ascii=False))
-        resp = requests.post(args.llama_url, json=payload, headers=headers, timeout=60)
-        logger.debug("Llama response [%d]: %s", resp.status_code, resp.text)
-        resp.raise_for_status()
-    except RequestException as e:
-        logger.error(f"Llama request failed: {e}")
-        return ""
-    # Parse JSON response
-    try:
-        j = resp.json()
-    except ValueError as e:
-        logger.error(f"Invalid JSON from Llama: {e}. Response text: {resp.text}")
-        return ""
-    choices = j.get("choices", [])
-    if choices and "message" in choices[0] and "content" in choices[0]["message"]:
-        return choices[0]["message"]["content"]
-    logger.error(f"Unexpected Llama resp structure: {j}")
-    return ""
-
-
-def health_check_endpoint(name: str, url: str, timeout: int = 5):
-    """Perform a quick HEAD request to verify the service is reachable."""
-    try:
-        resp = requests.head(url, timeout=timeout)
-        status = resp.status_code
-        # Treat 5xx codes as failures
-        if status >= 500:
-            logger.error(f"{name} endpoint returned HTTP {status}")
-            sys.exit(1)
-        logger.info(f"{name} endpoint reachable (HTTP {status})")
-    except requests.RequestException as e:
-        logger.error(f"{name} health-check failed: {e}")
-        sys.exit(1)
-
 def main(args):
     logger.info(f"Whisper URL: {args.whisper_url}")
     logger.info(f"Llama URL: {args.llama_url}")
@@ -259,7 +71,6 @@ def main(args):
     exit_event = threading.Event()
 
     # For audio padding computation
-    # use sample width obtained above
     bytes_per_sample = args.sample_width
     bytes_per_second = get_audio_bytes_per_second(
         args.rate, args.channels, bytes_per_sample
@@ -389,7 +200,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Real-time VAD + Whisper + Llama translation"
     )
-    # Server and audio arguments as before...
     parser.add_argument(
         "--whisper-url",
         type=str,
@@ -457,15 +267,19 @@ if __name__ == "__main__":
         type=str,
         default=os.environ.get("OUTPUT_FILE", DEFAULT_OUTPUT_FILE),
     )
-    # Optional: specify audio input device index (PyAudio)
     parser.add_argument(
         "--device-index",
         type=int,
-        default=(int(os.environ["DEVICE_INDEX"]) if os.environ.get("DEVICE_INDEX") is not None else None),
+        default=(
+            int(os.environ["DEVICE_INDEX"])
+            if os.environ.get("DEVICE_INDEX") is not None
+            else None
+        ),
         help="Index of audio input device (as listed by PyAudio).",
     )
     parser.add_argument(
-        "--debug", "-d",
+        "--debug",
+        "-d",
         action="store_true",
         help="Enable debug logging (sets log level to DEBUG)",
     )
@@ -476,7 +290,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     # Handle listing audio input devices
-    if getattr(args, 'list_devices', False):
+    if getattr(args, "list_devices", False):
         pa = pyaudio.PyAudio()
         print("Available audio input devices:")
         for i in range(pa.get_device_count()):
@@ -484,9 +298,11 @@ if __name__ == "__main__":
                 info = pa.get_device_info_by_index(i)
             except Exception:
                 continue
-            if info.get('maxInputChannels', 0) > 0:
-                channels = info.get('maxInputChannels')
-                print(f"{i}: {info.get('name')} ({channels} input channel{'s' if channels != 1 else ''})")
+            if info.get("maxInputChannels", 0) > 0:
+                channels = info.get("maxInputChannels")
+                print(
+                    f"{i}: {info.get('name')} ({channels} input channel{'s' if channels != 1 else ''})"
+                )
         pa.terminate()
         sys.exit(0)
     # Validate device-index if specified
@@ -498,7 +314,7 @@ if __name__ == "__main__":
             parser.error(f"Invalid device index {args.device_index}: {e}")
         finally:
             pa.terminate()
-        if info.get('maxInputChannels', 0) <= 0:
+        if info.get("maxInputChannels", 0) <= 0:
             parser.error(f"Device {args.device_index} has no input channels")
     # Configure debug logging if requested
     if args.debug:

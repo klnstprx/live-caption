@@ -1,6 +1,6 @@
 import pytest
 import io
-from live_caption import pad_audio, get_audio_bytes_per_second, trim_conversation_history
+from utils import pad_audio, get_audio_bytes_per_second, trim_conversation_history
 
 def test_get_audio_bytes_per_second():
     # 16kHz, mono, 2-byte samples => 16000 * 1 * 2 = 32000 bytes/s
