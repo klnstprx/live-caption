@@ -50,14 +50,7 @@ logging.basicConfig(
 def print_and_log(message: str, output_file_handle: Optional[Any] = None):
     # Log to console (with timestamp and level via logger configuration)
     logger.info(message)
-    # Also write to output file with timestamp and level prefix
-    if output_file_handle:
-        try:
-            ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            output_file_handle.write(f"{ts} [INFO] {message}\n")
-            output_file_handle.flush()
-        except Exception as e:
-            logger.error(f"Error writing to output file: {e}")
+    # File logging is handled by configured logging handlers
 
 
 def get_audio_bytes_per_second(rate: int, channels: int, sample_width: int) -> int:
@@ -245,16 +238,21 @@ def main(args):
     min_bytes = int((args.min_chunk_duration_ms / 1000.0) * bytes_per_second)
     min_bytes += (-min_bytes) % bytes_per_sample  # Multiple of sample width
 
-    # Logging to file if requested
+    # Prepare file handler for logging to file if requested
+    file_handler = None
+    # Dummy output_file_handle for legacy print_and_log signature
     output_file_handle = None
     if args.output_file:
         try:
-            output_file_handle = open(args.output_file, "a", encoding="utf-8")
-            output_file_handle.write(
-                f"\n--- Log Start: {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n"
-            )
+            file_handler = logging.FileHandler(args.output_file, encoding="utf-8")
+            formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+            file_handler.setFormatter(formatter)
+            file_handler.setLevel(logging.INFO)
+            logger.addHandler(file_handler)
+            logger.info("Logging to file: %s", args.output_file)
+            logger.info("--- Log Start: %s ---", time.strftime("%Y-%m-%d %H:%M:%S"))
         except Exception as e:
-            logger.error(f"Error opening output file: {e}")
+            logger.error(f"Error creating log file handler: {e}")
 
     capture_thread = threading.Thread(
         target=vad_capture_thread, args=(audio_queue, exit_event, args), daemon=True
@@ -335,15 +333,14 @@ def main(args):
             logger.info("Waiting for capture thread to exit...")
             capture_thread.join(timeout=2.0)
 
-        if output_file_handle:
+        # Finalize file logging
+        if file_handler:
+            logger.info("--- Log End: %s ---", time.strftime("%Y-%m-%d %H:%M:%S"))
+            logger.removeHandler(file_handler)
             try:
-                output_file_handle.write(
-                    f"--- Log End: {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n"
-                )
-                output_file_handle.close()
-                logger.info(f"Log saved to {args.output_file}")
-            except Exception as e:
-                logger.error(f"Error closing output file: {e}")
+                file_handler.close()
+            except Exception:
+                pass
         # Terminate the PyAudio instance used for sample width
         try:
             paudio.terminate()
