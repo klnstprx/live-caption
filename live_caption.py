@@ -10,6 +10,7 @@ import json
 import logging
 
 import pyaudio
+import requests
 
 # Local module imports
 from utils import (
@@ -20,8 +21,8 @@ from utils import (
     pad_audio,
 )
 from audio_capture import vad_capture_thread
-from stt_client import whisper_transcribe_chunk
-from translation_client import llama_translate
+from stt_client import WhisperClient
+from translation_client import LlamaClient
 
 # --- Constants ---
 DEFAULT_WHISPER_SERVER_URL = "http://127.0.0.1:8081/inference"
@@ -65,6 +66,10 @@ def main(args):
     # Instantiate PyAudio once to determine sample width (bytes per sample for paInt16)
     paudio = pyaudio.PyAudio()
     args.sample_width = paudio.get_sample_size(pyaudio.paInt16)
+    # Create HTTP session and clients for STT and translation
+    http_session = requests.Session()
+    stt_client = WhisperClient(args.whisper_url, session=http_session)
+    llama_client = LlamaClient(args.llama_url, args.model_name, session=http_session)
 
     conversation = [{"role": "system", "content": args.system_prompt}]
     audio_queue = queue.Queue(maxsize=10)
@@ -120,7 +125,9 @@ def main(args):
 
             # Whisper (STT)
             t0 = time.perf_counter()
-            recognized_ko = whisper_transcribe_chunk(audio_data, args)
+            recognized_ko = stt_client.transcribe(
+                audio_data, args.channels, args.sample_width, args.rate
+            )
             t1 = time.perf_counter()
             logger.info("Whisper STT latency: %.1f ms", (t1 - t0) * 1000)
             if not recognized_ko:
@@ -132,7 +139,7 @@ def main(args):
 
             # Llama translation
             t0 = time.perf_counter()
-            llama_reply_raw = llama_translate(conversation, args)
+            llama_reply_raw = llama_client.translate(conversation)
             t1 = time.perf_counter()
             logger.info("Llama translation latency: %.1f ms", (t1 - t0) * 1000)
             # If Llama returned nothing, drop the last user message to avoid context pollution
