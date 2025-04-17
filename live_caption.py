@@ -1,4 +1,4 @@
-# Standard and third-party imports
+"""Live caption orchestrator: capture audio via VAD, transcribe with Whisper, translate with Llama, and output in real time."""
 from dotenv import load_dotenv
 import os
 import sys
@@ -11,8 +11,9 @@ import logging
 
 import pyaudio
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-# Local module imports
 from utils import (
     print_and_log,
     trim_conversation_history,
@@ -24,7 +25,6 @@ from audio_capture import vad_capture_thread
 from stt_client import WhisperClient
 from translation_client import LlamaClient
 
-# --- Constants ---
 DEFAULT_WHISPER_SERVER_URL = "http://127.0.0.1:8081/inference"
 DEFAULT_LLAMA_SERVER_URL = "http://127.0.0.1:8080/v1/chat/completions"
 DEFAULT_RATE = 16000
@@ -50,7 +50,6 @@ Your response **must** be a structured JSON object with a single key, `translate
 DEFAULT_MAX_CONVERSATION_MESSAGES = 2 * 4 + 1
 DEFAULT_OUTPUT_FILE = None
 
-# --- Logging Setup ---
 logger = logging.getLogger("vad-whisper-llama")
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
@@ -58,15 +57,33 @@ logging.basicConfig(
 
 
 def main(args):
+    """
+    Main orchestration loop:
+    - Health-check services
+    - Capture audio via VAD
+    - Transcribe with Whisper
+    - Translate with Llama
+    - Print/log translated output
+    """
     logger.info(f"Whisper URL: {args.whisper_url}")
     logger.info(f"Llama URL: {args.llama_url}")
-    # Health-check the Whisper and Llama endpoints
+    health_check_endpoint("Whisper", args.whisper_url)
     health_check_endpoint("Whisper", args.whisper_url)
     health_check_endpoint("Llama", args.llama_url)
-    # Instantiate PyAudio once to determine sample width (bytes per sample for paInt16)
+    paudio = pyaudio.PyAudio()
     paudio = pyaudio.PyAudio()
     args.sample_width = paudio.get_sample_size(pyaudio.paInt16)
-    # Create HTTP session and clients for STT and translation
+    # Configure HTTP session with retry strategy
+    http_session = requests.Session()
+    retry_strategy = Retry(
+        total=3,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["HEAD", "GET", "OPTIONS", "POST"],
+        backoff_factor=1,
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    http_session.mount("http://", adapter)
+    http_session.mount("https://", adapter)
     http_session = requests.Session()
     stt_client = WhisperClient(args.whisper_url, session=http_session)
     llama_client = LlamaClient(args.llama_url, args.model_name, session=http_session)
@@ -83,9 +100,8 @@ def main(args):
     min_bytes = int((args.min_chunk_duration_ms / 1000.0) * bytes_per_second)
     min_bytes += (-min_bytes) % bytes_per_sample  # Multiple of sample width
 
-    # Prepare file handler for logging to file if requested
+    # Set up optional file logging if args.output_file is provided
     file_handler = None
-    # Dummy output_file_handle for legacy print_and_log signature
     output_file_handle = None
     if args.output_file:
         try:
@@ -200,7 +216,6 @@ def main(args):
             logger.error(f"Error terminating PyAudio: {e}")
 
 
-# --- CLI ---
 if __name__ == "__main__":
     load_dotenv()
 
