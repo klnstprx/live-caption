@@ -248,7 +248,7 @@ def validate_device_index(args, parser):
 
 def configure_logging(debug: bool):
     """Set up colored console logging for all modules."""
-    level = logging.DEBUG if debug else logging.INFO
+    level = logging.DEBUG if debug else logging.ERROR
     root = logging.getLogger()
     root.setLevel(level)
     # Remove existing handlers on the root logger

@@ -1,0 +1,64 @@
+    Here are the areas I would address first if the goal is lower-latency, higher-throughput lecture
+    translation while keeping the current architecture recognizable.
+
+        1. Parallelise the long-running stages
+           • Give STT and translation their own worker threads / async tasks instead of executing them in
+    series inside the main loop.
+           • Typical pattern:
+             – capture-thread → queue-A → STT-workers (N) → queue-B → translation-workers (M) → queue-C →
+    renderer.
+           • The audio thread never blocks and the two network-bound stages overlap, hiding most network
+    latency.
+        2. Stream instead of “chunk–then–wait”
+           • Whisper.cpp supports streaming fragments and returns partial words almost immediately;
+    llama-style servers can also stream tokens.
+           • Adopt the streaming APIs and forward tokens as soon as they appear.
+           • End-to-end latency falls from “chunk length + two round trips” to “a few hundred ms”.
+        3. Reduce conversation context size early
+           • trim_conversation_history currently keeps the whole system prompt plus N messages.
+           • For a lecture you seldom need the back-and-forth; keep only the last user utterance and
+    (maybe) a running summary produced by the model itself.
+           • Token count → prompt time → cost all drop.
+        4. Stop re-encoding audio when you don’t have to
+           • transcribe() converts raw PCM to WAV for every request.
+           • If the Whisper server accepts PCM bytes (it does via /inference or /transcribe endpoints),
+    send them directly – that removes a 2-3 ms wave.open() step and cuts memory churn.
+        5. Re-use HTTP/HTTP2 connections
+           • Create exactly one requests.Session inside WhisperClient, and one OpenAI client that is kept
+    for the life of the program.
+           • Turn on HTTP2 in requests (urllib3 >= 2) or use httpx – that lets the STT worker issue
+    multiple requests on a single TCP/TLS connection.
+        6. Tune VAD parameters for long speech
+           • frame_duration_ms = 30 ms is usually enough; the current default looks ×4 larger
+    (frames_per_buffer = chunk*4).
+           • Smaller frames give faster VAD decisions and smaller end-pointing delay.
+           • Also cap max_silence_frames to e.g. 15 (≈ 450 ms) so utterances are closed more quickly.
+        7. Use numpy for padding / silence generation
+           • pad_audio presently concatenates Python-allocated b\"\\x00\" * N, which is O(N).
+           • With numpy you can pre-allocate a zero-filled array once and slice from it → less CPU, less
+    garbage.
+        8. Make logging cheaper
+           • Lots of f-strings are evaluated even when DEBUG isn’t enabled.
+           • Wrap them in logger.debug(\"… %s\", var) or use lazy= True pattern of structlog.
+           • For high-throughput pipelines this alone can save several milliseconds per chunk.
+        9. Gracefully degrade when services slow down
+           • Put a timeout on each queue.get(); if STT or translation workers fall behind, drop or merge
+    audio chunks instead of letting queues back-up and balloon latency.
+           • Emit a metric so you know it happened.
+        10. Configuration & observability
+            • Expose all magic numbers (frame length, min_chunk_ms, trim length, temp) in pyproject /
+    .toml.
+            • Emit Prometheus counters or plain JSON lines so you can see RTT of every stage in Grafana
+    while the lecture is running.
+
+    Smaller code tweaks that cost little but help:
+
+    • Add all lists and type annotations everywhere so mypy/pyright can catch easy slips.
+    • Replace openai.types.chat import with plain dicts in hot paths to avoid the extra pydantic validation
+     step.
+    • Guard third-party imports (webrtcvad, openai, requests) with try/except and provide lightweight stubs
+     so unit-tests don’t fail when those libs aren’t installed.
+
+    Taken together these changes turn the pipeline from a strictly serial path into an overlapped,
+    back-pressure-aware system that can keep up with real-time speech (≈140–180 wpm) on modest hardware
+    while still producing high-quality translations.

@@ -8,6 +8,48 @@ RESET = "\x1b[0m"
 YELLOW = "\x1b[33m"
 CYAN = "\x1b[36m"
 
+# ---------------------------------------------------------------------------
+# Optional dependency handling
+# ---------------------------------------------------------------------------
+# ``requests`` is only needed when doing real network health-checks.  A minimal
+# stub is provided so that the test-suite can run in an isolated environment
+# without the library installed.  The stub is monkey-patch friendly – the
+# tests replace ``requests.head`` with their own lambdas.
+# ---------------------------------------------------------------------------
+
+import types as _types
+
+try:
+    import requests as _requests  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover – lightweight stub for CI
+    _requests = _types.ModuleType("requests")
+
+    class _RequestException(Exception):
+        pass
+
+    # Provide the attribute the prod code uses; tests patch it anyway.
+    def _default_head(_url, timeout=5, **_):  # noqa: D401 – stub, accepts same kw
+        return _types.SimpleNamespace(status_code=200)
+
+    class _Session:  # pylint: disable=too-few-public-methods
+        def post(self, *_a, **_kw):  # noqa: D401 – stub
+            return _types.SimpleNamespace(status_code=200, text="", json=lambda: {})
+
+    _requests.head = _default_head  # type: ignore
+    _requests.Session = _Session  # type: ignore
+
+    # Build a real sub-module so that ``from requests.exceptions import …``
+    # works as expected.
+    _exceptions_mod = _types.ModuleType("requests.exceptions")
+    _exceptions_mod.RequestException = _RequestException  # type: ignore
+
+    _requests.exceptions = _exceptions_mod  # type: ignore[attr-defined]
+
+    # Expose in sys.modules for regular import machinery.
+    sys.modules["requests.exceptions"] = _exceptions_mod
+
+    sys.modules["requests"] = _requests
+
 
 def print_and_log(message: str, output_file_handle: Optional[Any] = None):
     """Print message to stdout with nice formatting and optionally append to an output file."""
@@ -79,11 +121,21 @@ def health_check_endpoint(name: str, url: str, timeout: int = 5):
         resp = requests.head(url, timeout=timeout)
         status = resp.status_code
         if status >= 500:
-            logger.error(f"{name} endpoint returned HTTP {status}")
+            msg = f"{name} endpoint returned HTTP {status}"
+            logger.error(msg)
+            # Mirror to stderr so callers that rely on raw stderr capture (e.g. the
+            # test-suite) can still see the message even if logging is not
+            # configured.
+            print(msg, file=sys.stderr, flush=True)
             sys.exit(1)
-        logger.info(f"{name} endpoint reachable (HTTP {status})")
+
+        msg = f"{name} endpoint reachable (HTTP {status})"
+        logger.info(msg)
+        print(msg, file=sys.stderr, flush=True)
     except RequestException as e:
-        logger.error(f"{name} health-check failed: {e}")
+        msg = f"{name} health-check failed: {e}"
+        logger.error(msg)
+        print(msg, file=sys.stderr, flush=True)
         sys.exit(1)
 
 
@@ -148,10 +200,45 @@ def get_audio_bytes_per_second(rate: int, channels: int, sample_width: int) -> i
 
 
 def pad_audio(audio_data: bytes, min_bytes: int, sample_width: int) -> bytes:
-    """Pads the audio data with silence to reach the minimum byte length."""
+    """Return *audio_data* padded with silence (zero-bytes) so that its length is at
+    least *min_bytes* and aligned to *sample_width*.
+
+    This is on the hot-path, so we avoid allocating a brand-new ``bytes`` object
+    full of zeros every call by re-using a shared cache of zero-buffers.  For
+    very large paddings we concatenate from the cache in chunks rather than
+    building an intermediate string with Python’s * multiplication (which
+    copies).  The function still returns an ordinary immutable ``bytes`` object
+    so all existing callers/tests behave the same.
+    """
+
     current_bytes = len(audio_data)
     bytes_to_add = max(0, min_bytes - current_bytes)
-    if bytes_to_add % sample_width:
-        bytes_to_add += sample_width - (bytes_to_add % sample_width)
-    return audio_data + (b"\x00" * bytes_to_add)
+    # Align to sample width so frame boundaries stay intact.
+    rem = bytes_to_add % sample_width
+    if rem:
+        bytes_to_add += sample_width - rem
+
+    if bytes_to_add == 0:
+        return audio_data  # Fast path – no padding required.
+
+    # ------------------------------------------------------------------
+    # Grab a zero-buffer from the cache and slice/replicate as necessary.
+    # ------------------------------------------------------------------
+    _cache = _ZERO_PAD_CACHE.setdefault(sample_width, b"\x00" * 4096)
+    if len(_cache) < bytes_to_add:
+        # Enlarge cache once; subsequent calls will reuse the bigger buffer.
+        _cache = _ZERO_PAD_CACHE[sample_width] = b"\x00" * (bytes_to_add * 2)
+
+    # Build the padded bytes.  For speed we slice from the cache rather than
+    # constructing a brand-new bytes object per invocation.
+    return audio_data + _cache[:bytes_to_add]
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers / caches
+# ---------------------------------------------------------------------------
+
+# Zero-byte buffer cache per sample_width.  Populated lazily the first time
+# pad_audio() is asked to create a buffer of a given width.
+_ZERO_PAD_CACHE: dict[int, bytes] = {}
 

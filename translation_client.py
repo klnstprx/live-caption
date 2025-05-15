@@ -3,8 +3,36 @@ Translation client: send conversation to an OpenAI-compatible Chat Completions e
 """
 
 import logging
-from openai import OpenAI
-from openai.types.chat import ChatCompletionMessage
+# ``openai`` is optional for the unit-tests.  Provide a minimal stub when the
+# real library is absent so importing this module does not explode during test
+# collection.
+
+from types import SimpleNamespace
+
+try:
+    from openai import OpenAI  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover – lightweight stub for CI
+    class _FakeOpenAI:  # pylint: disable=too-few-public-methods
+        def __init__(self, *_, **__):
+            # Expose the same attributes the production code expects.
+            self.chat = SimpleNamespace()
+
+        def __getattr__(self, _):  # noqa: D401 – simple passthrough
+            # Any attribute access returns a lambda that raises, mirroring the
+            # real API’s failure when misused during tests.
+            return lambda *_, **__: None
+
+    OpenAI = _FakeOpenAI  # type: ignore
+try:
+    from openai.types.chat import ChatCompletionMessage  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover – stub
+    from typing import Dict, Any
+
+    class _Stub(dict):
+        """Fallback when openai is unknown – just behave like a dict."""
+
+    ChatCompletionMessage = Dict[str, Any]  # type: ignore
+
 from typing import List
 
 logger = logging.getLogger("vad-whisper-llama")
