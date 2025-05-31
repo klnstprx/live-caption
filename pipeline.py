@@ -32,7 +32,7 @@ from utils import (
 
 
 def run_pipeline(args, stt_client, translation_client):
-    logger = logging.getLogger("vad-whisper-llama")
+    logger = logging.getLogger(__name__)
     # -------------------------------
     # 1.  Setup shared state & queues
     # -------------------------------

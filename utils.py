@@ -1,8 +1,9 @@
 import sys
+import threading
 import logging
 from typing import Optional, Any, List, Dict
 
-logger = logging.getLogger("vad-whisper-llama")
+logger = logging.getLogger(__name__)
 # ANSI color codes for STT/translation prefixes
 RESET = "\x1b[0m"
 YELLOW = "\x1b[33m"
@@ -241,4 +242,4 @@ def pad_audio(audio_data: bytes, min_bytes: int, sample_width: int) -> bytes:
 # Zero-byte buffer cache per sample_width.  Populated lazily the first time
 # pad_audio() is asked to create a buffer of a given width.
 _ZERO_PAD_CACHE: dict[int, bytes] = {}
-
+_ZERO_PAD_CACHE_LOCK = threading.Lock()

@@ -60,7 +60,7 @@ import time
 import queue
 import logging
 
-logger = logging.getLogger("vad-whisper-llama")
+logger = logging.getLogger(__name__)
 
 
 def vad_capture_thread(audio_queue, exit_event, args):
@@ -135,7 +135,8 @@ def vad_capture_thread(audio_queue, exit_event, args):
             stream.close()
         pa.terminate()
         logger.info("Microphone capture thread exited.")
-    
+
+
 def list_audio_devices():
     """List available audio input devices."""
     pa = pyaudio.PyAudio()
@@ -145,9 +146,10 @@ def list_audio_devices():
             info = pa.get_device_info_by_index(i)
         except Exception:
             continue
-        if info.get('maxInputChannels', 0) > 0:
-            channels = info.get('maxInputChannels')
-            name = info.get('name')
-            print(f"{i}: {name} ({channels} input channel{'s' if channels != 1 else ''})")
+        if info.get("maxInputChannels", 0) > 0:
+            channels = info.get("maxInputChannels")
+            name = info.get("name")
+            print(
+                f"{i}: {name} ({channels} input channel{'s' if channels != 1 else ''})"
+            )
     pa.terminate()
-

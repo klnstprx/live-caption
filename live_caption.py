@@ -47,11 +47,12 @@ def check_required_dependencies():
 
 check_required_dependencies()
 
+import audio_capture
 from utils import health_check_endpoint, ColorFormatter
 
 # Default configuration
 DEFAULT_WHISPER_SERVER_URL = "http://127.0.0.1:8081/inference"
-DEFAULT_OPENAI_BASE_URL = "http://127.0.0.1:8080"
+DEFAULT_LLM_BASE_URL = "http://127.0.0.1:8080"
 DEFAULT_RATE = 16000
 DEFAULT_CHANNELS = 1
 DEFAULT_FRAME_DURATION_MS = 30
@@ -105,7 +106,7 @@ def create_arg_parser():
         "--rate",
         type=int,
         choices=[8000, 16000, 32000, 48000],
-        default=int(os.environ.get("RATE", DEFAULT_RATE)),
+        default=int(os.environ.get("RATE", str(DEFAULT_RATE))),
         help="Audio sampling rate in Hz",
     )
     audio.add_argument(
@@ -176,10 +177,10 @@ def create_arg_parser():
     # Translation API settings
     trans = parser.add_argument_group("Translation options")
     trans.add_argument(
-        "--openai-base-url",
+        "--llm-base-url",
         type=str,
-        default=os.environ.get("OPENAI_API_BASE_URL", DEFAULT_OPENAI_BASE_URL),
-        help="OpenAI API base URL",
+        default=os.environ.get("LLM_BASE_URL", DEFAULT_LLM_BASE_URL),
+        help="LLM base URL",
     )
 
     # Output & logging
@@ -203,30 +204,6 @@ def create_arg_parser():
     )
 
     return parser
-
-
-def list_audio_input_devices():
-    """Print a list of available audio input devices."""
-    try:
-        from audio_capture import list_audio_devices
-
-        list_audio_devices()
-    except ImportError:
-        import pyaudio
-
-        pa = pyaudio.PyAudio()
-        print("Available audio input devices:")
-        for i in range(pa.get_device_count()):
-            try:
-                info = pa.get_device_info_by_index(i)
-            except Exception:
-                continue
-            if int(info.get("maxInputChannels", 0)) > 0:
-                channels = info["maxInputChannels"]
-                name = info["name"]
-                plural = "s" if channels != 1 else ""
-                print(f"{i}: {name} ({channels} input channel{plural})")
-        pa.terminate()
 
 
 def validate_device_index(args, parser):
@@ -315,7 +292,7 @@ def main(args):
     stt_client = WhisperClient(args.whisper_url, session=session)
     translation_client = TranslationClient(
         model_name=args.model_name,
-        base_url=args.openai_base_url,
+        base_url=args.llm_base_url,
         timeout=60,
     )
 
@@ -333,7 +310,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.list_devices:
-        list_audio_input_devices()
+        audio_capture.list_audio_devices()
         sys.exit(0)
 
     validate_device_index(args, parser)

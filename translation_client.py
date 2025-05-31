@@ -12,6 +12,7 @@ from types import SimpleNamespace
 try:
     from openai import OpenAI  # type: ignore
 except ModuleNotFoundError:  # pragma: no cover – lightweight stub for CI
+
     class _FakeOpenAI:  # pylint: disable=too-few-public-methods
         def __init__(self, *_, **__):
             # Expose the same attributes the production code expects.
@@ -35,7 +36,7 @@ except ModuleNotFoundError:  # pragma: no cover – stub
 
 from typing import List
 
-logger = logging.getLogger("vad-whisper-llama")
+logger = logging.getLogger(__name__)
 
 
 class TranslationClient:
@@ -82,8 +83,10 @@ class TranslationClient:
         Send chat messages to the API and return the JSON string output.
         """
         # Log translation call (model_name may be undefined in some test contexts)
-        model_name = getattr(self, 'model_name', None)
-        logger.debug("OpenAI translate: model=%s, messages=%s", model_name, conversation)
+        model_name = getattr(self, "model_name", None)
+        logger.debug(
+            "OpenAI translate: model=%s, messages=%s", model_name, conversation
+        )
         # Determine which client method to call (real OpenAI SDK vs. custom client)
         call = None
         try:
@@ -91,17 +94,18 @@ class TranslationClient:
             call = self.client.chat.completions.create
         except Exception:
             # Fallback: client.create()
-            call = getattr(self.client, 'create', None)
+            call = getattr(self.client, "create", None)
         if not callable(call):
-            raise AttributeError("No suitable create method found on TranslationClient client.")
+            raise AttributeError(
+                "No suitable create method found on TranslationClient client."
+            )
         # Invoke completion call
         resp = call(
             model=model_name,
             messages=conversation,
             temperature=0.7,
-            response_format=getattr(self, 'response_format', None),
+            response_format=getattr(self, "response_format", None),
         )
         # Extract JSON-level response (string)
         content = resp.choices[0].message.content
         return content
-

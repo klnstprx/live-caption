@@ -1,6 +1,7 @@
 """
 STT (Whisper) client: convert PCM audio to WAV and send to Whisper server.
 """
+
 import io
 import wave
 import logging
@@ -13,6 +14,7 @@ from types import SimpleNamespace
 try:
     import requests  # type: ignore
 except ModuleNotFoundError:  # pragma: no cover – stub only for tests/CI
+
     class _FakeResponse:  # pylint: disable=too-few-public-methods
         def __init__(self, status_code=200, text="", json_data=None):
             self.status_code = status_code
@@ -33,12 +35,14 @@ except ModuleNotFoundError:  # pragma: no cover – stub only for tests/CI
     # expose the attributes the production code references
     requests = SimpleNamespace(Session=_FakeSession)  # type: ignore
 
-logger = logging.getLogger("vad-whisper-llama")
+logger = logging.getLogger(__name__)
+
 
 class WhisperClient:
     """
     HTTP client for Whisper STT server.
     """
+
     def __init__(
         self,
         url: str,
@@ -68,7 +72,6 @@ class WhisperClient:
 
         self.url = url
         self.session = session if session is not None else requests.Session()
-        self.timeout = timeout
         self.send_pcm = send_pcm
         self.timeout = timeout
 
@@ -108,9 +111,7 @@ class WhisperClient:
         data = {"temperature": 0.0, "temperature_inc": 0.2, "response_format": "json"}
         logger.debug("Whisper request URL: %s, send_pcm=%s", self.url, self.send_pcm)
         # Send request to Whisper STT server
-        resp = self.session.post(
-            self.url, files=files, data=data, timeout=self.timeout
-        )
+        resp = self.session.post(self.url, files=files, data=data, timeout=self.timeout)
         logger.debug("Whisper response [%d]: %s", resp.status_code, resp.text)
         # Raise for HTTP errors
         resp.raise_for_status()
